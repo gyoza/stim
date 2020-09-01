@@ -6,6 +6,7 @@ import (
 	"github.com/PremiereGlobal/stim/pkg/utils"
 	"github.com/PremiereGlobal/stim/stim"
 	v2e "github.com/PremiereGlobal/vault-to-envs/pkg/vaulttoenvs"
+	"github.com/davecgh/go-spew/spew"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"os"
@@ -20,9 +21,10 @@ const (
 	defaultDeployDirectory = "./"
 	defaultDeployScript    = "deploy.sh"
 	defaultConfigFile      = "./stim.deploy.yaml"
-	defaultStencilVars     = "STENCIL_VAR_"
-	defaultStencil         = "STENCIL"
-	defaultStencilRendered = "STENCIL_OUT"
+	defaultTemplateKV      = "STIM_TEMPLATE_KV_"
+	defaultTemplateList    = "STIM_TEMPLATE_LIST_"
+	defaultTemplateIn      = "STIM_TEMPLATE_IN"
+	defaultTemplateOut     = "STIM_TEMPLATE_OUT"
 )
 
 // Config is the root structure for the deployment configuration
@@ -209,7 +211,7 @@ func (d *Deploy) processConfig() {
 
 			instance.Spec.Tools = mergeTools(instance.Spec.Tools, environment.Spec.Tools, d.config.Global.Spec.Tools)
 			instance.Spec.EnvironmentVars = mergeEnvVars(instance.Spec.EnvironmentVars, environment.Spec.EnvironmentVars, d.config.Global.Spec.EnvironmentVars)
-			instance.Spec.EnvironmentVars = d.stenciler(instance.Spec.EnvironmentVars)
+			instance.Spec.EnvironmentVars = d.stimTemplater(instance.Spec.EnvironmentVars)
 			instance.Spec.Secrets = mergeSecrets(instance.Spec.Secrets, environment.Spec.Secrets, d.config.Global.Spec.Secrets)
 
 			// Get Vault details
@@ -323,11 +325,11 @@ func (d *Deploy) validateSpec(spec *Spec) {
 //      env:
 //        - name: ENVIRONMENT
 //          value: nonprod
-//        - name: STENCIL_VAR_test1
+//        - name: STIM_TEMPLATE_VAR_test1
 //          value: my_value_1
-//        - name: STENCIL_VAR_test2
+//        - name: STIM_TEMPLATE_VAR_test2
 //          value: my_value_2
-//        - name: STENCIL
+//        - name: STIM_TEMPLATE_IN
 //          value: >
 //            {{.test1}}
 //            {{ range .test1 }}
@@ -340,47 +342,56 @@ func (d *Deploy) validateSpec(spec *Spec) {
 //      map[Key:test1 Value:my_value_1]
 //      map[Key:test2 Value:my_value_2]
 //
-// Executes on STENCIL variable template producing:
+// Executes on STIM_TEMPLATE_IN variable template producing:
 // map[Key:test1 Value:my_value_1]
 //   test1
 //
 //   my_value_1
 //  --set test1=my_value_1 --set test2=my_value_2
 //
-// When using "${STENCIL_OUT}" within your deploy.sh it will be replaced with the rendered
-// template passed within the STENCIL var automagically!
-func (d *Deploy) stenciler(instance []*EnvironmentVar) []*EnvironmentVar {
+// When using "${STIM_TEMPLATE_OUT}" within your deploy.sh it will be replaced with the rendered
+// template passed within the STIM_TEMPLATE_IN automagically!
+func (d *Deploy) stimTemplater(instance []*EnvironmentVar) []*EnvironmentVar {
 
-	var setStencil string
+	var setTemplateOut string
 	var tmplBuffer bytes.Buffer
-	stencilMap := map[string]map[string]string{}
-
+	varMap := map[string]map[string]string{}
+	varList := map[string][]string{}
 	result := instance
 
 	for _, s := range instance {
-		if strings.Contains(s.Name, defaultStencil) {
-			setStencil = s.Value
+		if strings.Contains(s.Name, defaultTemplateIn) {
+			setTemplateOut = s.Value
 		}
-		if strings.Contains(s.Name, defaultStencilVars) {
-			var k = strings.TrimPrefix(s.Name, defaultStencilVars)
-			if _, ok := stencilMap[k]; !ok {
-				stencilMap[k] = map[string]string{}
-				stencilMap[k]["Key"] = k
-				stencilMap[k]["Value"] = s.Value
+		if strings.Contains(s.Name, defaultTemplateKV) {
+			var k = strings.TrimPrefix(s.Name, defaultTemplateKV)
+			if _, ok := varMap[k]; !ok {
+				varMap[k] = map[string]string{}
+				varMap[k]["Key"] = k
+				varMap[k]["Value"] = s.Value
 			}
 		}
+		if strings.Contains(s.Name, defaultTemplateList) {
+			var k = strings.TrimPrefix(s.Name, defaultTemplateList)
+			spew.Dump(k, s.Value)
+			varList[k] = strings.Split(s.Value, ",")
+		}
 	}
-	thisTemplate, err := template.New("stencil").Parse(setStencil)
-	if err != nil {
-		d.log.Fatal("Deployment STENCIL template variable could not be parsed: {}", err)
+	comboMap := map[string]interface{}{
+		"kvmap": varMap,
+		"list":  varList,
 	}
-	err = thisTemplate.Execute(&tmplBuffer, stencilMap)
+	thisTemplate, err := template.New("stencil").Parse(setTemplateOut)
 	if err != nil {
-		d.log.Fatal("Deployment STENCIL template variable could not be executed: {}", err)
+		d.log.Fatal("Deployment STIM template variables could not be parsed: {}", err)
+	}
+	err = thisTemplate.Execute(&tmplBuffer, comboMap)
+	if err != nil {
+		d.log.Fatal("Deployment STIM template in could not be rendered: {}", err)
 	}
 	if tmplBuffer.String() != "" {
 		s := new(EnvironmentVar)
-		s.Name = defaultStencilRendered
+		s.Name = defaultTemplateOut
 		stringBuf := tmplBuffer.String()
 		stringBuf = strings.Replace(stringBuf, "\n", "\n", -1)
 		s.Value = stringBuf
