@@ -316,31 +316,45 @@ func (d *Deploy) validateSpec(spec *Spec) {
 	}
 }
 
-// stenciler looks for any variables starting with "defaultStencilVars" and produces maps for go templates..
+// stimTemplater looks for any variables starting with "STIM_TEMPLATE_KV" or "STIM_TEMPLATE_LIST"
+// then creates go template objects to be used within the provided user template within "STIM_TEMPLATE_IN" variable.
+// Rendered templates become available within the STIM_TEMPLATE_OUT environment variable with the deploy run time and
+// can be used to supplement your deploy files.
 //
-// Example:
+// Example stim.deploy.yaml
+//
 //environments:
 //  - name: nonprod
 //    spec:
 //      env:
 //        - name: ENVIRONMENT
 //          value: nonprod
-//        - name: STIM_TEMPLATE_VAR_test1
-//          value: my_value_1
-//        - name: STIM_TEMPLATE_VAR_test2
-//          value: my_value_2
+//        - name: STIM_TEMPLATE_KV_examplekv
+//          value: this_is_a_thing
+//        - name: STIM_TEMPLATE_LIST_clusters_prod
+//          value: "my-non-prod-cluster-1,my-non-prod-cluster-"
+//        - name: STIM_TEMPLATE_LIST_clusters_nonprod
+//          value: "my-non-prod-cluster-1,my-non-prod-cluster-2"
 //        - name: STIM_TEMPLATE_IN
 //          value: >
-//            {{.test1}}
-//            {{ range .test1 }}
-//              {{.}}
-//            {{ end }}
-//            --set {{ .test1.Key }}={{ .test1.Value }}
-//            --set {{ .test2.Key }}={{ .test2.Value }}
+//            {{range .list.myclusters}}
+//            helm install prometheus/prometheus --set-name=prometheus-{{.}} --f values-{{ $.kvmap.environment.Value }}.yaml
+//
+//            {{end}}
+//            ${STINK}
+//
+//            echo {{ .list.holyshit }}
 //
 // Creates Go objects:
-//      map[Key:test1 Value:my_value_1]
-//      map[Key:test2 Value:my_value_2]
+// map[kvmap:map[
+//			environment:map[Key:environment Value:nonprod]
+//			example:map[Key:example Value:example_value]
+// ]
+//
+// list:map[
+// 			nonprod_clusters:[my-non-prod-cluster-1 my-non-prod-cluster-2]
+//			prod_clusters:[my-prod-cluster-1 my-prod-cluster-2]
+// ]
 //
 // Executes on STIM_TEMPLATE_IN variable template producing:
 // map[Key:test1 Value:my_value_1]
@@ -355,8 +369,8 @@ func (d *Deploy) stimTemplater(instance []*EnvironmentVar) []*EnvironmentVar {
 
 	var setTemplateOut string
 	var tmplBuffer bytes.Buffer
-	varMap := map[string]map[string]string{}
-	varList := map[string][]string{}
+	mapKV := map[string]map[string]string{}
+	mapList := map[string][]string{}
 	result := instance
 
 	for _, s := range instance {
@@ -365,27 +379,32 @@ func (d *Deploy) stimTemplater(instance []*EnvironmentVar) []*EnvironmentVar {
 		}
 		if strings.Contains(s.Name, defaultTemplateKV) {
 			var k = strings.TrimPrefix(s.Name, defaultTemplateKV)
-			if _, ok := varMap[k]; !ok {
-				varMap[k] = map[string]string{}
-				varMap[k]["Key"] = k
-				varMap[k]["Value"] = s.Value
+			if _, ok := mapKV[k]; !ok {
+				mapKV[k] = map[string]string{}
+				mapKV[k]["Key"] = k
+				mapKV[k]["Value"] = s.Value
 			}
 		}
 		if strings.Contains(s.Name, defaultTemplateList) {
 			var k = strings.TrimPrefix(s.Name, defaultTemplateList)
-			spew.Dump(k, s.Value)
-			varList[k] = strings.Split(s.Value, ",")
+			if strings.Contains(s.Value, ",") {
+				mapList[k] = strings.Split(s.Value, ",")
+			} else {
+				d.log.Fatal("Unable to parse value {}  - must be comma separated list.", s.Name)
+			}
 		}
 	}
-	comboMap := map[string]interface{}{
-		"kvmap": varMap,
-		"list":  varList,
+	templateMap := map[string]interface{}{
+		"kvmap": mapKV,
+		"list":  mapList,
 	}
+	fmt.Println(templateMap)
+	spew.Dump("a")
 	thisTemplate, err := template.New("stencil").Parse(setTemplateOut)
 	if err != nil {
 		d.log.Fatal("Deployment STIM template variables could not be parsed: {}", err)
 	}
-	err = thisTemplate.Execute(&tmplBuffer, comboMap)
+	err = thisTemplate.Execute(&tmplBuffer, templateMap)
 	if err != nil {
 		d.log.Fatal("Deployment STIM template in could not be rendered: {}", err)
 	}
@@ -393,7 +412,7 @@ func (d *Deploy) stimTemplater(instance []*EnvironmentVar) []*EnvironmentVar {
 		s := new(EnvironmentVar)
 		s.Name = defaultTemplateOut
 		stringBuf := tmplBuffer.String()
-		stringBuf = strings.Replace(stringBuf, "\n", "\n", -1)
+		// stringBuf = strings.Replace(stringBuf, "\n", "\n", -1)
 		s.Value = stringBuf
 		result = append(result, s)
 	}
